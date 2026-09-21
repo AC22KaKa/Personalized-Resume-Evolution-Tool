@@ -1,0 +1,2 @@
+I built a RAG chatbot using LangChain and Chroma. It answers questions from PDFs.
+I deployed it on Streamlit Cloud. I fixed deployment issues with requirements.txt and secrets.
