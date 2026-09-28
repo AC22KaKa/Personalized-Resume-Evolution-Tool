@@ -19,18 +19,20 @@ class FakeResponse:
 
 
 class FakeCompletions:
-    def __init__(self, payload: dict):
-        self.payload = payload
+    def __init__(self, payloads: list[dict]):
+        self.payloads = payloads
         self.last_kwargs = None
+        self.calls = []
 
     def create(self, **kwargs):
         self.last_kwargs = kwargs
-        return FakeResponse(self.payload)
+        self.calls.append(kwargs)
+        return FakeResponse(self.payloads.pop(0))
 
 
 class FakeClient:
-    def __init__(self, payload: dict):
-        self.chat = type("Chat", (), {"completions": FakeCompletions(payload)})()
+    def __init__(self, payloads: list[dict]):
+        self.chat = type("Chat", (), {"completions": FakeCompletions(payloads)})()
 
 
 def payload() -> dict:
@@ -48,7 +50,7 @@ def payload() -> dict:
 
 
 def test_generate_resume_validates_mocked_provider(monkeypatch):
-    fake_client = FakeClient(payload())
+    fake_client = FakeClient([payload()])
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("MODEL_NAME", "test-model")
@@ -60,3 +62,17 @@ def test_generate_resume_validates_mocked_provider(monkeypatch):
     assert fake_client.chat.completions.last_kwargs["temperature"] == 0.2
     assert fake_client.chat.completions.last_kwargs["response_format"] == {"type": "json_object"}
 
+
+def test_generate_resume_repairs_invalid_first_response(monkeypatch):
+    invalid = payload()
+    invalid["bullets"][0]["star"] = "✨"
+    fake_client = FakeClient([invalid, payload()])
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(core, "OpenAI", lambda **_: fake_client)
+
+    result = core.generate_resume("Built a retrieval assistant.", "Looking for RAG experience.")
+
+    assert result.project_name == "Demo Assistant"
+    assert len(fake_client.chat.completions.calls) == 2
+    assert fake_client.chat.completions.calls[1]["temperature"] == 0
+    assert "failed validation" in fake_client.chat.completions.calls[1]["messages"][-1]["content"]

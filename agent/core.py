@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import ValidationError
 
-from .prompts import SYSTEM_PROMPT, build_user_prompt
+from .prompts import SYSTEM_PROMPT, build_repair_prompt, build_user_prompt
 from .schemas import ResumeResult
 
 load_dotenv()
@@ -39,6 +39,21 @@ def _extract_content(response: Any) -> str:
     return content.strip()
 
 
+def _validate_content(content: str) -> ResumeResult:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError("返回内容不是合法 JSON") from exc
+    try:
+        return ResumeResult.model_validate(payload)
+    except ValidationError as exc:
+        errors = []
+        for error in exc.errors(include_url=False, include_input=False):
+            location = ".".join(str(part) for part in error["loc"])
+            errors.append(f"{location}: {error['msg']}")
+        raise ValueError("；".join(errors)) from exc
+
+
 def generate_resume(raw_experience: str, target_jd: str, language: str = "English") -> ResumeResult:
     """Generate and validate structured resume content using an OpenAI-compatible API."""
 
@@ -48,25 +63,33 @@ def generate_resume(raw_experience: str, target_jd: str, language: str = "Englis
         raise ResumeAgentError("请先填写目标职位描述。")
 
     client, model_name = _get_client()
-    try:
-        response = client.chat.completions.create(
-            model=model_name,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(raw_experience, target_jd, language)},
-            ],
-        )
-    except Exception as exc:
-        raise ResumeAgentError(f"调用模型失败：{exc}") from exc
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": build_user_prompt(raw_experience, target_jd, language)},
+    ]
 
-    content = _extract_content(response)
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ResumeAgentError("模型返回的内容不是合法 JSON，请重试。") from exc
-    try:
-        return ResumeResult.model_validate(payload)
-    except ValidationError as exc:
-        raise ResumeAgentError(f"模型返回的字段未通过校验：{exc}") from exc
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                temperature=0.2 if attempt == 0 else 0,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+        except Exception as exc:
+            raise ResumeAgentError(f"调用模型失败：{exc}") from exc
+
+        content = _extract_content(response)
+        try:
+            return _validate_content(content)
+        except ValueError as exc:
+            if attempt == 1:
+                raise ResumeAgentError("模型连续两次返回了不完整内容，请再次点击生成或更换模型后重试。") from exc
+            messages.extend(
+                [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": build_repair_prompt(str(exc))},
+                ]
+            )
+
+    raise ResumeAgentError("模型未能生成有效内容，请重试。")
